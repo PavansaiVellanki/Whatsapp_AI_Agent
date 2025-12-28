@@ -1,0 +1,9 @@
+python-dotenv
+fastapi
+uvicorn
+requests
+
+google-genai
+
+appwrite
+guardrails-ai
