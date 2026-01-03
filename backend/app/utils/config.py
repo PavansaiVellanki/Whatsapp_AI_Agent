@@ -28,6 +28,26 @@ WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "default_verify_token
 # WhatsApp API Base URL
 WHATSAPP_API_BASE_URL = "https://graph.facebook.com/v22.0"
 
+# Redis Configuration
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+
+# Rate Limiting Configuration
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+RATE_LIMIT_PER_HOUR = int(os.getenv("RATE_LIMIT_PER_HOUR", "500"))
+
+# Qdrant Vector Database Configuration
+QDRANT_ENDPOINT = os.getenv("QDRANT_ENDPOINT")
+QDRANT_KEY = os.getenv("QDRANT_KEY")  # Optional, for cloud Qdrant
+QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "whatsapp_documents")
+
+# Document Processing Configuration
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+
 # Validate required environment variables
 def validate_config():
     """Validate that all required environment variables are set"""

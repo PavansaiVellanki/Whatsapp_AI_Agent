@@ -100,11 +100,19 @@ class GuardrailsService:
                 return True, reason
         
         # Check for excessive special characters (potential encoding/obfuscation)
-        special_char_ratio = len(re.findall(r'[^\w\s]', text)) / max(len(text), 1)
-        if special_char_ratio > 0.3 and len(text) > 20:
-            reason = "Suspicious character pattern detected"
-            logger.warning(f"Suspicious character pattern: {text[:100]}")
-            return True, reason
+        # Skip this check if text looks like code (contains common code patterns)
+        # Code naturally has many special characters, so this check is too aggressive for legitimate code
+        code_keywords = ['def ', 'import ', 'class ', 'function', 'print(', 'return ', 'if ', 'for ', 'while ', 
+                        'from ', 'try:', 'except', 'lambda', '=>', '->', '()', '[]', '{}']
+        is_likely_code = any(keyword in text for keyword in code_keywords)
+        
+        if not is_likely_code:
+            special_char_ratio = len(re.findall(r'[^\w\s]', text)) / max(len(text), 1)
+            # Increased threshold from 0.3 to 0.5 to reduce false positives
+            if special_char_ratio > 0.5 and len(text) > 20:
+                reason = "Suspicious character pattern detected"
+                logger.warning(f"Suspicious character pattern: {text[:100]}")
+                return True, reason
         
         return False, None
     
@@ -145,16 +153,27 @@ class GuardrailsService:
                 logger.warning(f"Abusive language detected by Guardrails AI: {text[:100]}")
                 return True, "Inappropriate language detected"
         
+        # Skip aggressive checks for code-like responses
+        code_keywords = ['def ', 'import ', 'class ', 'function', 'print(', 'return ', 'if ', 'for ', 'while ', 
+                        'from ', 'try:', 'except', 'lambda', '=>', '->', '()', '[]', '{}']
+        is_likely_code = any(keyword in text for keyword in code_keywords)
+        
         # Fallback: Check for excessive capitalization (often indicates aggression)
-        caps_ratio = sum(1 for c in text if c.isupper()) / max(len(text), 1)
-        if caps_ratio > 0.7 and len(text) > 10:
-            logger.warning(f"Excessive capitalization detected: {text[:100]}")
-            return True, "Aggressive language pattern detected"
+        # Skip for code responses as code often uses uppercase for constants
+        if not is_likely_code:
+            caps_ratio = sum(1 for c in text if c.isupper()) / max(len(text), 1)
+            if caps_ratio > 0.7 and len(text) > 10:
+                logger.warning(f"Excessive capitalization detected: {text[:100]}")
+                return True, "Aggressive language pattern detected"
         
         # Check for repeated characters (spam/aggression indicator)
-        if re.search(r'(.)\1{4,}', text):
-            logger.warning(f"Repeated character pattern detected: {text[:100]}")
-            return True, "Spam-like pattern detected"
+        # Only check non-whitespace characters and increase threshold to reduce false positives
+        # Skip for code responses as code may have repeated characters (e.g., ===, ---, etc.)
+        if not is_likely_code:
+            # Check for non-whitespace characters repeated 6+ times (increased from 5)
+            if re.search(r'(\S)\1{5,}', text):
+                logger.warning(f"Repeated character pattern detected: {text[:100]}")
+                return True, "Spam-like pattern detected"
         
         return False, None
     
@@ -235,8 +254,17 @@ class GuardrailsService:
                 profanity_guard.validate(response)
                 
             except Exception as e:
-                logger.warning(f"AI response contains inappropriate content: {response[:100]}")
-                return False, "Response contains inappropriate content"
+                # Log the actual error for debugging
+                logger.warning(f"AI response validation failed: {str(e)}")
+                logger.warning(f"Response preview: {response[:200]}")
+                
+                # Only block if it's clearly toxic/profane, not for code or other false positives
+                error_str = str(e).lower()
+                if 'toxic' in error_str or 'profanity' in error_str:
+                    logger.warning(f"AI response contains inappropriate content: {response[:100]}")
+                    return False, "Response contains inappropriate content"
+                # For other errors (like jailbreak false positives on code), log but allow
+                logger.info(f"Guardrails flagged response but allowing (likely false positive for code): {str(e)[:100]}")
         
         response_lower = response.lower()
         

@@ -112,6 +112,53 @@ class WhatsAppService:
             logger.error(f"Unexpected error sending WhatsApp message: {e}", exc_info=True)
             return False
     
+    def download_media(self, media_id: str) -> Optional[bytes]:
+        """
+        Download media (image, video, etc.) from WhatsApp Cloud API
+        
+        Args:
+            media_id: Media ID from WhatsApp webhook
+            
+        Returns:
+            Media file bytes, or None if download failed
+        """
+        if not self.access_token:
+            logger.error("WhatsApp credentials not configured. Cannot download media.")
+            return None
+        
+        try:
+            # First, get the media URL
+            url = f"{self.api_base_url}/{media_id}"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}"
+            }
+            
+            logger.info(f"Fetching media URL for media_id: {media_id}")
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            media_info = response.json()
+            media_url = media_info.get("url")
+            
+            if not media_url:
+                logger.error(f"No URL found in media info: {media_info}")
+                return None
+            
+            # Download the actual media file
+            logger.info(f"Downloading media from: {media_url}")
+            media_response = requests.get(media_url, headers=headers, timeout=30)
+            media_response.raise_for_status()
+            
+            logger.info(f"Media downloaded successfully, size: {len(media_response.content)} bytes")
+            return media_response.content
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error downloading media: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error downloading media: {e}", exc_info=True)
+            return None
+    
     def is_configured(self) -> bool:
         """Check if WhatsApp service is properly configured"""
         return bool(self.access_token and self.phone_id)

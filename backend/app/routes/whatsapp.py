@@ -7,14 +7,21 @@ from app.services.appwrite_service import AppwriteService
 from app.services.ai_service import AIService
 from app.services.guardrails_service import GuardrailsService
 from app.services.whatsapp_service import WhatsAppService
+from app.services.vector_db_service import VectorDBService
+from app.services.document_service import DocumentService
+from app.services.chunking_service import ChunkingService
 from app.models.chat import ChatMessageCreate, ChatMessageResponse
 from app.utils.config import WHATSAPP_SECRET_KEY, WHATSAPP_VERIFY_TOKEN, WHATSAPP_BOT_PHONE_NUMBER
 from app.utils.constants import ROLE_BOT, ROLE_USER
+from app.utils.image_utils import resize_image_for_llm
+from app.middleware.rate_limit import rate_limit_by_ip, rate_limit_dependency
+from app.services.rate_limit_service import RateLimitService
 from typing import Optional
 import hmac
 import hashlib
 import json
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +42,24 @@ def get_guardrails_service() -> GuardrailsService:
 def get_whatsapp_service() -> WhatsAppService:
     """Dependency to get WhatsApp service instance"""
     return WhatsAppService()
+
+def get_rate_limit_service() -> RateLimitService:
+    """Dependency to get rate limit service instance"""
+    from app.services.rate_limit_service import RateLimitService
+    return RateLimitService()
+
+def get_vector_db_service() -> VectorDBService:
+    """Dependency to get Vector DB service instance"""
+    return VectorDBService()
+
+def get_document_service() -> DocumentService:
+    """Dependency to get Document service instance"""
+    return DocumentService()
+
+def get_chunking_service() -> ChunkingService:
+    """Dependency to get Chunking service instance"""
+    from app.utils.config import CHUNK_SIZE, CHUNK_OVERLAP
+    return ChunkingService(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
 def verify_whatsapp_signature(payload: bytes, signature: str, secret: str) -> bool:
     """
@@ -103,7 +128,9 @@ async def whatsapp_webhook(
     appwrite_service: AppwriteService = Depends(get_appwrite_service),
     ai_service: AIService = Depends(get_ai_service),
     guardrails: GuardrailsService = Depends(get_guardrails_service),
-    whatsapp_service: WhatsAppService = Depends(get_whatsapp_service)
+    whatsapp_service: WhatsAppService = Depends(get_whatsapp_service),
+    rate_limit_service: RateLimitService = Depends(get_rate_limit_service),
+    _: None = Depends(rate_limit_by_ip)
 ):
     """
     Handle incoming WhatsApp messages from Meta Cloud API
@@ -184,20 +211,111 @@ async def whatsapp_webhook(
                                 logger.info(f"Message type: {message_type}")
                                 message_text = ""
                                 
+                                # Initialize image_bytes variable
+                                image_bytes = None
+                                
                                 if message_type == "text":
                                     message_text = message.get("text", {}).get("body", "")
                                 elif message_type == "image":
                                     # Handle image messages
-                                    caption = message.get("image", {}).get("caption", "")
-                                    message_text = f"[Image] {caption}" if caption else "[Image message]"
+                                    image_data = message.get("image", {})
+                                    image_id = image_data.get("id")
+                                    caption = image_data.get("caption", "")
+                                    
+                                    # Download the image if available
+                                    if image_id and whatsapp_service.is_configured():
+                                        logger.info(f"Downloading image with ID: {image_id}")
+                                        raw_image_bytes = whatsapp_service.download_media(image_id)
+                                        
+                                        if raw_image_bytes:
+                                            # Resize image to reduce token consumption
+                                            logger.info(f"Resizing image for LLM processing")
+                                            image_bytes = resize_image_for_llm(raw_image_bytes, max_dimension=768)
+                                            logger.info(f"Image processed, size: {len(image_bytes)} bytes")
+                                            message_text = caption if caption else "Please analyze this image"
+                                        else:
+                                            logger.warning(f"Could not download image {image_id}")
+                                            message_text = f"[Image] {caption}" if caption else "[Image message]"
+                                    else:
+                                        message_text = f"[Image] {caption}" if caption else "[Image message]"
+                                        if not image_id:
+                                            logger.warning("Image message received but no image ID found")
                                 elif message_type == "audio":
                                     message_text = "[Audio message]"
                                 elif message_type == "video":
                                     caption = message.get("video", {}).get("caption", "")
                                     message_text = f"[Video] {caption}" if caption else "[Video message]"
                                 elif message_type == "document":
-                                    filename = message.get("document", {}).get("filename", "")
-                                    message_text = f"[Document] {filename}" if filename else "[Document]"
+                                    # Handle document uploads
+                                    document_data = message.get("document", {})
+                                    document_id = document_data.get("id")
+                                    filename = document_data.get("filename", "document")
+                                    caption = document_data.get("caption", "")
+                                    
+                                    logger.info(f"Document received: {filename}, ID: {document_id}")
+                                    
+                                    if document_id and whatsapp_service.is_configured():
+                                        # Download the document
+                                        logger.info(f"Downloading document with ID: {document_id}")
+                                        document_bytes = whatsapp_service.download_media(document_id)
+                                        
+                                        if document_bytes:
+                                            try:
+                                                # Process document
+                                                vector_db = VectorDBService()
+                                                doc_service = DocumentService()
+                                                chunking_service = ChunkingService()
+                                                
+                                                # Extract text from document
+                                                text, error = doc_service.extract_text(document_bytes, filename)
+                                                
+                                                if text and not error:
+                                                    # Generate unique document ID
+                                                    doc_uuid = str(uuid.uuid4())
+                                                    
+                                                    # Chunk the document
+                                                    chunks = chunking_service.chunk_text(
+                                                        text,
+                                                        metadata={"filename": filename}
+                                                    )
+                                                    
+                                                    # Store chunks in Qdrant
+                                                    success = vector_db.store_document_chunks(
+                                                        chunks=chunks,
+                                                        user_phone=user_phone,
+                                                        document_id=doc_uuid,
+                                                        filename=filename
+                                                    )
+                                                    
+                                                    if success:
+                                                        message_text = "document is processed"
+                                                        logger.info(f"Document {filename} processed and stored successfully ({len(chunks)} chunks)")
+                                                    else:
+                                                        message_text = f"⚠️ Document '{filename}' was received but there was an error storing it. Please try again."
+                                                        logger.error(f"Failed to store document chunks for {filename}")
+                                                else:
+                                                    message_text = f"❌ Could not extract text from '{filename}'. {error or 'Unsupported file format or empty document.'}"
+                                                    logger.error(f"Document extraction failed: {error}")
+                                            except Exception as e:
+                                                logger.error(f"Error processing document: {e}", exc_info=True)
+                                                message_text = f"❌ Error processing document '{filename}': {str(e)}"
+                                        else:
+                                            message_text = f"❌ Could not download document '{filename}'. Please try again."
+                                            logger.error(f"Failed to download document {document_id}")
+                                    else:
+                                        message_text = f"📄 Document '{filename}' received. Processing..."
+                                        if not document_id:
+                                            logger.warning("Document message received but no document ID found")
+                                    
+                                    # Send immediate response about document processing
+                                    if whatsapp_service.is_configured():
+                                        whatsapp_service.send_message(
+                                            to_phone=user_phone,
+                                            message_text=message_text
+                                        )
+                                    
+                                    # Skip normal message processing for documents
+                                    continue
                                 else:
                                     message_text = f"[{message_type} message]"
                                 
@@ -208,6 +326,21 @@ async def whatsapp_webhook(
                                     logger.warning(f"Empty message text for type {message_type}")
                                     continue
                                 
+                                # Check rate limit for phone number
+                                phone_allowed, phone_info = rate_limit_service.check_rate_limit(user_phone)
+                                if not phone_allowed:
+                                    logger.warning(f"Rate limit exceeded for phone number: {user_phone}")
+                                    # Send rate limit message to user
+                                    if whatsapp_service.is_configured():
+                                        rate_limit_message = (
+                                            "You've sent too many messages. Please wait a moment before trying again."
+                                        )
+                                        whatsapp_service.send_message(
+                                            to_phone=user_phone,
+                                            message_text=rate_limit_message
+                                        )
+                                    continue
+                                
                                 # Process the message
                                 logger.info(f"Calling process_whatsapp_message for user {user_phone}")
                                 bot_response = await process_whatsapp_message(
@@ -215,7 +348,8 @@ async def whatsapp_webhook(
                                     message_text=message_text,
                                     appwrite_service=appwrite_service,
                                     ai_service=ai_service,
-                                    guardrails=guardrails
+                                    guardrails=guardrails,
+                                    image_bytes=image_bytes
                                 )
                                 
                                 logger.info(f"Bot response generated: {bot_response[:100] if bot_response else 'None'}")
@@ -287,7 +421,8 @@ async def process_whatsapp_message(
     message_text: str,
     appwrite_service: AppwriteService,
     ai_service: AIService,
-    guardrails: GuardrailsService
+    guardrails: GuardrailsService,
+    image_bytes: Optional[bytes] = None
 ) -> Optional[str]:
     """
     Process incoming WhatsApp message and generate bot response
@@ -298,6 +433,7 @@ async def process_whatsapp_message(
         appwrite_service: Appwrite service instance
         ai_service: AI service instance
         guardrails: Guardrails service instance
+        image_bytes: Optional image data (bytes) for multimodal input
         
     Returns:
         Bot response text, or None if processing failed
@@ -337,9 +473,13 @@ async def process_whatsapp_message(
         
         # Generate AI response
         logger.info("Generating AI response...")
+        if image_bytes:
+            logger.info(f"Processing message with image (size: {len(image_bytes)} bytes)")
         bot_response_text = ai_service.generate_response(
             user_message=sanitized_message,
-            chat_history=chat_history
+            chat_history=chat_history,
+            image_bytes=image_bytes,
+            user_phone=user_phone
         )
         logger.info(f"AI response generated: {bot_response_text[:100]}...")
         

@@ -10,12 +10,14 @@ A WhatsApp chatbot powered by Google Gemini AI, built with FastAPI. This bot can
 - 📊 **Database Storage**: Stores chat history in Appwrite database
 - 🛡️ **Input Validation**: Comprehensive input sanitization and validation
 - 📝 **Chat History**: Maintains conversation context for better responses
+- ⚡ **Rate Limiting**: Redis-based rate limiting to prevent spam, DDoS attacks, and excessive token usage
 
 ## Prerequisites
 
 - Python 3.8 or higher
 - Appwrite account and project
 - Google AI API key (Gemini)
+- Redis server (for rate limiting)
 - WhatsApp Business Account (for WhatsApp integration)
 - Meta Developer Account (for WhatsApp Cloud API)
 
@@ -53,6 +55,38 @@ guardrails hub install hub://guardrails/detect_jailbreak
 guardrails hub install hub://guardrails/toxic_language
 ```
 
+### 5. Setup Redis (Required for Rate Limiting)
+
+#### Option A: Local Redis Installation
+
+**Windows:**
+- Download Redis from [Redis for Windows](https://github.com/microsoftarchive/redis/releases) or use WSL
+- Or use Docker: `docker run -d -p 6379:6379 redis:latest`
+
+**Linux/Mac:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install redis-server
+
+# macOS (using Homebrew)
+brew install redis
+brew services start redis
+
+# Or use Docker
+docker run -d -p 6379:6379 redis:latest
+```
+
+#### Option B: Cloud Redis (Production)
+
+- Use Redis Cloud, AWS ElastiCache, or Azure Cache for Redis
+- Update `REDIS_HOST` in `.env` with your Redis endpoint
+
+Verify Redis is running:
+```bash
+redis-cli ping
+# Should return: PONG
+```
+
 ## Configuration
 
 ### 1. Create `.env` File
@@ -78,6 +112,17 @@ WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
 WHATSAPP_BUSINESS_PHONE_ID=your_phone_number_id
 WHATSAPP_BOT_PHONE_NUMBER=your_bot_phone_number
 WHATSAPP_VERIFY_TOKEN=your_custom_verify_token
+
+# Redis Configuration (Required for rate limiting)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
+
+# Rate Limiting Configuration
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_PER_MINUTE=30
+RATE_LIMIT_PER_HOUR=500
 ```
 
 ### 2. How to Get API Keys
@@ -264,7 +309,10 @@ backend/
 │   │   ├── ai_service.py        # Google Gemini AI service
 │   │   ├── appwrite_service.py  # Appwrite database service
 │   │   ├── guardrails_service.py # Security guardrails
+│   │   ├── rate_limit_service.py # Rate limiting service
 │   │   └── whatsapp_service.py   # WhatsApp API service
+│   ├── middleware/
+│   │   └── rate_limit.py        # Rate limiting middleware/dependencies
 │   └── utils/
 │       ├── config.py             # Configuration management
 │       └── constants.py          # Constants
@@ -282,6 +330,10 @@ backend/
 - **Input Sanitization**: Cleans and validates all user inputs
 - **Response Validation**: Validates AI responses before sending
 - **Webhook Signature Verification**: Verifies WhatsApp webhook authenticity
+- **Rate Limiting**: Redis-based rate limiting protects against spam, DDoS attacks, and excessive token usage
+  - Tracks both phone numbers and IP addresses
+  - Configurable limits: 30 requests/minute, 500 requests/hour (default)
+  - Graceful degradation: If Redis is unavailable, requests are allowed (fail-open)
 
 ## Troubleshooting
 
@@ -318,6 +370,24 @@ backend/
 - Install validators: `guardrails hub install hub://guardrails/detect_jailbreak hub://guardrails/toxic_language`
 - The app will use fallback validation if Guardrails AI is not installed
 
+### Rate Limiting Issues
+
+- **Redis Connection Failed**: 
+  - Verify Redis is running: `redis-cli ping`
+  - Check `REDIS_HOST` and `REDIS_PORT` in `.env`
+  - If Redis is unavailable, rate limiting is disabled (fail-open) and requests are allowed
+  - Check application logs for Redis connection errors
+
+- **Rate Limit Too Strict**:
+  - Adjust `RATE_LIMIT_PER_MINUTE` and `RATE_LIMIT_PER_HOUR` in `.env`
+  - Default: 30 requests/minute, 500 requests/hour
+  - Restart the application after changing values
+
+- **Rate Limit Not Working**:
+  - Verify `RATE_LIMIT_ENABLED=true` in `.env`
+  - Check Redis connection in application logs
+  - Rate limiting tracks both phone numbers and IP addresses
+
 ## Development
 
 ### Running Tests
@@ -353,3 +423,13 @@ isort .
 - `WHATSAPP_VERIFY_TOKEN` - Webhook verify token
 - `WHATSAPP_BUSINESS_ACCOUNT_ID` - Business account ID
 - `WHATSAPP_PROJECT_ID` - WhatsApp project ID
+
+### Optional Variables (for Rate Limiting)
+
+- `REDIS_HOST` - Redis server host (default: localhost)
+- `REDIS_PORT` - Redis server port (default: 6379)
+- `REDIS_PASSWORD` - Redis password (optional)
+- `REDIS_DB` - Redis database number (default: 0)
+- `RATE_LIMIT_ENABLED` - Enable/disable rate limiting (default: true)
+- `RATE_LIMIT_PER_MINUTE` - Requests allowed per minute (default: 30)
+- `RATE_LIMIT_PER_HOUR` - Requests allowed per hour (default: 500)

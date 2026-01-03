@@ -7,3 +7,12 @@ google-genai
 
 appwrite
 guardrails-ai
+redis
+Pillow
+
+# Vector Database
+qdrant-client
+
+# Document Processing
+pymupdf
+python-docx

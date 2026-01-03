@@ -1,12 +1,13 @@
 """
 Chat API routes
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from app.models.chat import ChatMessageCreate, ChatMessageResponse, ChatRequest
 from app.services.appwrite_service import AppwriteService
 from app.services.ai_service import AIService
 from app.services.guardrails_service import GuardrailsService
 from app.utils.constants import BOT_PHONE_NUMBER, USER_PHONE_NUMBER, ROLE_BOT, ROLE_USER
+from app.middleware.rate_limit import rate_limit_dependency
 from typing import List
 import logging
 
@@ -26,13 +27,23 @@ def get_guardrails_service() -> GuardrailsService:
     """Dependency to get Guardrails service instance"""
     return GuardrailsService()
 
+async def check_rate_limit_for_chat(
+    http_request: Request,
+    user_phone: str = None
+):
+    """Rate limit dependency for chat endpoint"""
+    phone_number = user_phone or USER_PHONE_NUMBER
+    await rate_limit_dependency(http_request, phone_number)
+
 @router.post("/chat", response_model=ChatMessageResponse)
 async def send_message(
     request: ChatRequest,
+    http_request: Request,
     user_phone: str = None,  # Optional: can be passed for testing
     appwrite_service: AppwriteService = Depends(get_appwrite_service),
     ai_service: AIService = Depends(get_ai_service),
-    guardrails: GuardrailsService = Depends(get_guardrails_service)
+    guardrails: GuardrailsService = Depends(get_guardrails_service),
+    _: None = Depends(check_rate_limit_for_chat)
 ):
     """
     Send a message and get AI response
